@@ -1,0 +1,651 @@
+<!doctype html>
+<html lang="ja">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>LX-D02 印刷</title>
+<style>
+  :root { --bg:#f4f5f7; --card:#fff; --text:#1f2937; --sub:#6b7280; --line:#d1d5db; --pri:#ea580c; --ok:#15803d; --ng:#b91c1c; }
+  * { box-sizing: border-box; }
+  body { margin: 0; font-family: "Yu Gothic UI","Meiryo",sans-serif; background: var(--bg); color: var(--text); }
+  header { background: #1f2937; color: #fff; padding: 10px 16px; display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
+  header h1 { margin: 0; font-size: 18px; flex: 1; }
+  .dot { width: 12px; height: 12px; border-radius: 50%; background: #9ca3af; display: inline-block; margin-right: 6px; vertical-align: middle; }
+  .dot.on { background: #22c55e; }
+  main { padding: 14px 16px; display: flex; gap: 16px; flex-wrap: wrap; align-items: flex-start; }
+  .card { background: var(--card); border-radius: 12px; padding: 14px; box-shadow: 0 1px 3px rgba(0,0,0,.12); }
+  .ctrl { flex: 1 1 260px; max-width: 420px; }
+  button { font: inherit; font-size: 18px; padding: 12px 16px; border-radius: 10px; border: 2px solid transparent; cursor: pointer; width: 100%; margin-top: 10px; touch-action: manipulation; }
+  button:disabled { opacity: .4; cursor: default; }
+  .pri { background: var(--pri); color: #fff; font-weight: bold; }
+  .plain { background: #fff; border-color: var(--line); }
+  .big { font-size: 22px; padding: 18px; }
+  #msg { margin-top: 12px; font-size: 17px; min-height: 1.5em; }
+  #msg.err { color: var(--ng); font-weight: bold; }
+  #msg.ok { color: var(--ok); font-weight: bold; }
+  .bar { height: 8px; background: #e5e7eb; border-radius: 4px; overflow: hidden; margin-top: 10px; }
+  .bar i { display: block; height: 100%; width: 0; background: var(--pri); transition: width .2s; }
+  .hint { color: var(--sub); font-size: 13px; line-height: 1.6; margin: 12px 0 0; }
+  label.chk { display: flex; align-items: center; gap: 8px; margin-top: 12px; font-size: 16px; }
+  label.chk input { width: 20px; height: 20px; }
+  .prev canvas { width: 288px; height: auto; border: 1px solid #ddd; background: #fff; display: block; }
+  .prev h3, .ctrl h3 { margin: 0 0 8px; font-size: 15px; color: var(--sub); font-weight: normal; }
+  ul.hist { list-style: none; padding: 0; margin: 8px 0 0; font-size: 14px; max-height: 160px; overflow: auto; }
+  ul.hist li { padding: 4px 0; border-bottom: 1px solid #eee; }
+</style>
+</head>
+<body>
+<header>
+  <h1>LX-D02 修理カルテ印刷</h1>
+  <span id="conn"><span class="dot"></span>未接続</span>
+  <span id="batt"></span>
+</header>
+<main>
+  <div class="card ctrl">
+    <h3>プリンタ</h3>
+    <button id="connectBtn" class="pri big">プリンタに接続</button>
+    <button id="printBtn" class="plain" disabled>このカルテをもう一度印刷</button>
+    <label class="chk"><input type="checkbox" id="auto" checked> カルテが届いたら自動で印刷する</label>
+    <div class="bar"><i id="prog"></i></div>
+    <div id="msg"></div>
+    <h3 style="margin-top:16px">印刷した記録（この画面を開いている間）</h3>
+    <ul class="hist" id="hist"></ul>
+    <p class="hint">この画面は開いたままにしてください。閉じると、次の印刷でまたプリンタの選択が必要になります。<br>
+      カルテの内容はこの画面の中だけで使い、どこにも送信しません。</p>
+  </div>
+  <div class="card prev">
+    <h3>印刷イメージ（48mm幅）</h3>
+    <div id="preview"><p class="hint">カルテアプリの「LX-D02で印刷」を押すと、ここに表示されます。</p></div>
+  </div>
+</main>
+
+<script>
+/*!
+ * lxd02-print.js — LX-D02 感熱プリンタ用 Web Bluetooth 印刷モジュール
+ *
+ * Chrome / Edge（Windows 10 以降）で、HTMLアプリから LX-D02 に直接印刷します。
+ * ドライバーや tp.exe は不要です。
+ *
+ * 使い方（最小）:
+ *   <script src="lxd02-print.js"><\/script>
+ *   <button onclick="LXD02.printText('こんにちは')">印刷</button>
+ *
+ * 初回はブラウザのBluetooth選択画面が出るので「LX-D02」を選びます。
+ * 同じページを開いている間は、2回目以降は選択画面なしで印刷できます。
+ *
+ * 書式（printText）:
+ *   # 見出し          … 大きい太字・中央寄せ
+ *   ## 小見出し       … 太字
+ *   #! 文字          … 特大の太字・中央寄せ（カルテNo.など）
+ *   [[grid 2 3 1,5]] … たて2×よこ3の分割図（1と5を黒く塗って×）
+ *   ---              … 区切り線
+ *   ===              … 二重線
+ *   品名<TAB>¥1,000   … タブの右側を右寄せ（明細の金額などに）
+ *   ## 合計<TAB>¥5,800 … 太字・少し大きめで右寄せ
+ *   >> 文字          … 中央寄せ
+ *   空行              … 空行
+ *   長い行は自動で折り返します。
+ *
+ * 通信仕様は rusq/thermoprint と joaquimorg/lxprint（どちらも MIT License）を参考にしています。
+ */
+(function (global) {
+  "use strict";
+
+  var SERVICE = 0xffe6, TX = 0xffe1, RX = 0xffe2;
+  var WIDTH = 384;               // 印字幅 48mm = 384ドット
+  var PACKET_DELAY_MS = 40;      // パケット間隔（Windowsで動作確認済みの値）
+  var REPLY_TIMEOUT_MS = 4000;
+  var FINISH_TIMEOUT_MS = 60000;
+  var FONT_FAMILY = '"BIZ UDPGothic","BIZ UDGothic","Yu Gothic UI","Yu Gothic","Meiryo","MS Gothic",sans-serif';
+
+  function sleep(ms) { return new Promise(function (r) { setTimeout(r, ms); }); }
+
+  function crc16xmodem(bytes) {
+    var crc = 0;
+    for (var i = 0; i < bytes.length; i++) {
+      crc ^= bytes[i] << 8;
+      for (var j = 0; j < 8; j++) crc = (crc & 0x8000) ? ((crc << 1) ^ 0x1021) : (crc << 1);
+      crc &= 0xffff;
+    }
+    return crc;
+  }
+
+  function hex(u8) {
+    return Array.prototype.map.call(u8, function (b) { return ("0" + b.toString(16)).slice(-2); }).join(" ");
+  }
+
+  // ---------------------------------------------------------------- 描画 ----
+  /** テキスト（簡易書式付き）を 384px 幅の canvas に描画して返す */
+  function renderText(text, opts) {
+    opts = opts || {};
+    var size = opts.fontSize || 22;           // px（22px ≒ 全角17文字/行）
+    var pad = opts.padding != null ? opts.padding : 4;
+    var lineGap = Math.round(size * 0.35);
+    var tail = opts.feed != null ? opts.feed : 60; // 最後の余白（切り取り用）
+    var maxW = WIDTH - pad * 2;
+
+    var c = document.createElement("canvas");
+    var ctx = c.getContext("2d");
+    function font(px, bold) { return (bold ? "bold " : "") + px + "px " + FONT_FAMILY; }
+
+    // 折り返し
+    function wrap(str, px, bold) {
+      ctx.font = font(px, bold);
+      var out = [], cur = "";
+      for (var i = 0; i < str.length; i++) {
+        var ch = str[i];
+        if (ctx.measureText(cur + ch).width > maxW && cur) { out.push(cur); cur = ch; }
+        else cur += ch;
+      }
+      out.push(cur);
+      return out;
+    }
+
+    // レイアウト
+    var items = [];
+    String(text).replace(/\r\n?/g, "\n").split("\n").forEach(function (raw) {
+      var line = raw.replace(/\s+$/, "");
+      if (line === "---") return items.push({ type: "rule", h: size * 0.8 });
+      if (line === "===") return items.push({ type: "double", h: size * 0.9 });
+      if (line === "") return items.push({ type: "blank", h: Math.round(size * 0.6) });
+      var m;
+      if ((m = line.match(/^\[\[grid (\d+) (\d+) ?([\d,]*)\]\]$/))) {
+        var gr = +m[1], gc = +m[2];
+        var cw = maxW / gc, ch = Math.max(26, Math.min(cw * 0.75, 60));
+        return items.push({ type: "grid", rows: gr, cols: gc, ng: m[3] ? m[3].split(",") : [], cw: cw, ch: ch, h: ch * gr + 8 });
+      }
+      if ((m = line.match(/^#! (.*)$/))) {
+        var huge = Math.round(size * 1.9);
+        return wrap(m[1], huge, true).forEach(function (t) { items.push({ type: "text", t: t, px: huge, bold: true, align: "center", h: huge + lineGap }); });
+      }
+      if ((m = line.match(/^# (.*)$/))) {
+        var big = Math.round(size * 1.5);
+        return wrap(m[1], big, true).forEach(function (t) { items.push({ type: "text", t: t, px: big, bold: true, align: "center", h: big + lineGap }); });
+      }
+      if ((m = line.match(/^## (.*)$/)) && line.indexOf("\t") < 0) {
+        return wrap(m[1], size, true).forEach(function (t) { items.push({ type: "text", t: t, px: size, bold: true, align: "left", h: size + lineGap }); });
+      }
+      if ((m = line.match(/^>> ?(.*)$/))) {
+        return wrap(m[1], size, false).forEach(function (t) { items.push({ type: "text", t: t, px: size, align: "center", h: size + lineGap }); });
+      }
+      if (line.indexOf("\t") >= 0) {
+        var parts = line.split("\t");
+        var left = parts[0], right = parts.slice(1).join(" ");
+        var pb = /^## /.test(left);
+        if (pb) left = left.slice(3);
+        var ppx = pb ? Math.round(size * 1.2) : size;
+        ctx.font = font(ppx, pb);
+        var rw = ctx.measureText(right).width;
+        if (rw > maxW * 0.62) {
+          wrap(left, ppx, pb).forEach(function (t) { items.push({ type: "text", t: t, px: ppx, bold: pb, align: "left", h: ppx + lineGap }); });
+          var vl = wrap(right, ppx, pb);
+          vl.forEach(function (t) { items.push({ type: "text", t: t, px: ppx, bold: pb, align: vl.length > 1 ? "left" : "right", h: ppx + lineGap }); });
+          return;
+        }
+        var leftLines = (function () { var save = maxW; maxW = save - rw - size * 0.5; var r = wrap(left, ppx, pb); maxW = save; return r; })();
+        leftLines.forEach(function (t, i) {
+          items.push({ type: "pair", l: t, r: i === leftLines.length - 1 ? right : "", px: ppx, bold: pb, h: ppx + lineGap });
+        });
+        return;
+      }
+      wrap(line, size, false).forEach(function (t) { items.push({ type: "text", t: t, px: size, align: "left", h: size + lineGap }); });
+    });
+
+    var height = pad;
+    items.forEach(function (it) { height += it.h; });
+    height += tail;
+
+    c.width = WIDTH;
+    c.height = Math.ceil(height);
+    ctx.fillStyle = "#fff";
+    ctx.fillRect(0, 0, c.width, c.height);
+    ctx.fillStyle = "#000";
+    ctx.strokeStyle = "#000";
+    ctx.textBaseline = "top";
+
+    var y = pad;
+    items.forEach(function (it) {
+      if (it.type === "rule") {
+        ctx.lineWidth = 2; ctx.setLineDash([6, 4]);
+        ctx.beginPath(); ctx.moveTo(pad, y + it.h / 2); ctx.lineTo(WIDTH - pad, y + it.h / 2); ctx.stroke();
+        ctx.setLineDash([]);
+      } else if (it.type === "double") {
+        ctx.lineWidth = 2;
+        [-3, 3].forEach(function (d) { ctx.beginPath(); ctx.moveTo(pad, y + it.h / 2 + d); ctx.lineTo(WIDTH - pad, y + it.h / 2 + d); ctx.stroke(); });
+      } else if (it.type === "grid") {
+        ctx.lineWidth = 2;
+        var fs = Math.max(12, Math.min(22, Math.floor(it.ch * 0.5)));
+        for (var gi = 0; gi < it.rows * it.cols; gi++) {
+          var gx = pad + (gi % it.cols) * it.cw, gy = y + 4 + Math.floor(gi / it.cols) * it.ch;
+          var no = String(gi + 1), bad = it.ng.indexOf(no) >= 0;
+          ctx.fillStyle = "#000";
+          if (bad) ctx.fillRect(gx, gy, it.cw, it.ch);
+          ctx.strokeRect(gx + 1, gy + 1, it.cw - 2, it.ch - 2);
+          ctx.fillStyle = bad ? "#fff" : "#000";
+          ctx.font = font(fs, bad);
+          ctx.textAlign = "center";
+          ctx.fillText((bad ? "×" : "") + no, gx + it.cw / 2, gy + (it.ch - fs) / 2);
+        }
+        ctx.fillStyle = "#000";
+      } else if (it.type === "text") {
+        ctx.font = font(it.px, it.bold);
+        ctx.textAlign = it.align;
+        ctx.fillText(it.t, it.align === "center" ? WIDTH / 2 : pad, y);
+      } else if (it.type === "pair") {
+        ctx.font = font(it.px, it.bold);
+        ctx.textAlign = "left"; ctx.fillText(it.l, pad, y);
+        ctx.textAlign = "right"; ctx.fillText(it.r, WIDTH - pad, y);
+      }
+      y += it.h;
+    });
+    return c;
+  }
+
+  /** 任意の canvas / img を 384px 幅に縮小した canvas にする */
+  function fitToWidth(src) {
+    var w = src.width || src.naturalWidth, h = src.height || src.naturalHeight;
+    var scale = Math.min(1, WIDTH / w);
+    var c = document.createElement("canvas");
+    c.width = WIDTH; c.height = Math.max(1, Math.round(h * scale));
+    var ctx = c.getContext("2d");
+    ctx.fillStyle = "#fff"; ctx.fillRect(0, 0, c.width, c.height);
+    ctx.drawImage(src, 0, 0, Math.round(w * scale), c.height);
+    return c;
+  }
+
+  /** canvas → LX-D02 のパケット配列（1パケット = 55 hi lo + 2行×48byte + 00） */
+  function canvasToPackets(canvas, threshold) {
+    threshold = threshold || 128;
+    var ctx = canvas.getContext("2d");
+    var h = canvas.height;
+    var data = ctx.getImageData(0, 0, WIDTH, h).data;
+    var rowsNeeded = h + (h % 2) + 2; // 偶数にそろえて、最後に空白パケットを1つ
+    var n = rowsNeeded / 2;
+    var packets = [];
+    for (var p = 0; p < n; p++) {
+      var pkt = new Uint8Array(100);
+      pkt[0] = 0x55; pkt[1] = (p >> 8) & 0xff; pkt[2] = p & 0xff;
+      for (var line = 0; line < 2; line++) {
+        var y = p * 2 + line;
+        if (y >= h) continue;
+        for (var x = 0; x < WIDTH; x++) {
+          var o = (y * WIDTH + x) * 4;
+          var a = data[o + 3];
+          var lum = 0.2126 * data[o] + 0.7152 * data[o + 1] + 0.0722 * data[o + 2];
+          if (a > 10 && lum < threshold) pkt[3 + line * 48 + (x >> 3)] |= 0x80 >> (x & 7);
+        }
+      }
+      packets.push(pkt);
+    }
+    return packets;
+  }
+
+  // ------------------------------------------------------------ プリンタ ----
+  function Printer() {
+    this.device = null;
+    this.tx = null;
+    this.rx = null;
+    this.waiters = [];          // {prefix, resolve, reject, timer}
+    this.listeners = {};
+    this.busy = false;
+    this.energy = 3;            // 濃さ 1〜6
+    this.log = function () { if (global.LXD02_DEBUG) console.log.apply(console, ["[LXD02]"].concat([].slice.call(arguments))); };
+    this._onNotify = this._onNotify.bind(this);
+    this._onDisconnect = this._onDisconnect.bind(this);
+  }
+
+  Printer.prototype.on = function (ev, fn) { (this.listeners[ev] = this.listeners[ev] || []).push(fn); };
+  Printer.prototype._emit = function (ev, val) { (this.listeners[ev] || []).forEach(function (f) { try { f(val); } catch (e) { console.error(e); } }); };
+  Printer.prototype._status = function (msg) { this._emit("status", msg); };
+
+  Printer.prototype.isSupported = function () { return !!(global.navigator && navigator.bluetooth); };
+  Printer.prototype.isConnected = function () { return !!(this.device && this.device.gatt && this.device.gatt.connected && this.tx); };
+
+  /** プリンタを選んで接続（ボタンのクリックから呼ぶ） */
+  Printer.prototype.connect = function () {
+    var self = this;
+    if (this._connecting) return this._connecting;
+    this._connecting = this._connect().finally(function () { self._connecting = null; });
+    return this._connecting;
+  };
+
+  Printer.prototype._connect = async function () {
+    if (!this.isSupported()) throw new Error("このブラウザはBluetooth印刷に対応していません。ChromeかEdgeで開いてください。");
+    if (!this.device) {
+      this._status("プリンタを選んでください…");
+      this.device = await navigator.bluetooth.requestDevice({
+        filters: [{ namePrefix: "LX" }],
+        optionalServices: [SERVICE]
+      });
+      this.device.addEventListener("gattserverdisconnected", this._onDisconnect);
+    }
+    if (this.isConnected()) return;
+    var lastErr;
+    for (var attempt = 1; attempt <= 3; attempt++) {
+      try {
+        this._status("接続中…");
+        var server = await this.device.gatt.connect();
+        var svc = await server.getPrimaryService(SERVICE);
+        this.tx = await svc.getCharacteristic(TX);
+        this.rx = await svc.getCharacteristic(RX);
+        await this.rx.startNotifications();
+        this.rx.removeEventListener("characteristicvaluechanged", this._onNotify);
+        this.rx.addEventListener("characteristicvaluechanged", this._onNotify);
+        await this._handshake();
+        this._status("接続しました：" + (this.device.name || "LX-D02"));
+        this._emit("connected", this.device.name);
+        return;
+      } catch (e) {
+        lastErr = e;
+        this.log("connect attempt", attempt, "failed", e);
+        try { this.device.gatt.disconnect(); } catch (_) {}
+        this.tx = this.rx = null;
+        await sleep(500 * attempt);
+      }
+    }
+    throw lastErr;
+  };
+
+  /** 以前に許可したプリンタへ、選択画面なしでつなぎ直す（ブラウザが対応していれば） */
+  Printer.prototype.reconnectKnown = async function () {
+    if (this.isConnected()) return true;
+    if (!this.device) {
+      if (!navigator.bluetooth || !navigator.bluetooth.getDevices) return false;
+      var list = await navigator.bluetooth.getDevices();
+      var d = list.filter(function (x) { return /^LX/.test(x.name || ""); })[0];
+      if (!d) return false;
+      this.device = d;
+      d.addEventListener("gattserverdisconnected", this._onDisconnect);
+    }
+    var self = this;
+    try {
+      await Promise.race([this.connect(), sleep(12000).then(function () { throw new Error("timeout"); })]);
+      return self.isConnected();
+    } catch (e) { this.log("reconnectKnown failed", e); return false; }
+  };
+
+  Printer.prototype.disconnect = function () {
+    try { if (this.device && this.device.gatt.connected) this.device.gatt.disconnect(); } catch (_) {}
+    this.tx = this.rx = null;
+  };
+
+  /** 接続先を忘れる（別のプリンタを選び直すとき） */
+  Printer.prototype.forget = function () { this.disconnect(); this.device = null; };
+
+  Printer.prototype._onDisconnect = function () {
+    this.tx = this.rx = null;
+    this._status("プリンタとの接続が切れました（次の印刷で自動的につなぎ直します）");
+    this._emit("disconnected");
+  };
+
+  Printer.prototype._write = async function (bytes) {
+    for (var i = 0; ; i++) {
+      try { return await this.tx.writeValueWithoutResponse(bytes); }
+      catch (e) { if (i >= 3) throw e; await sleep(20 * (i + 1)); }
+    }
+  };
+
+  Printer.prototype._wait = function (b1, ms) {
+    var self = this;
+    return new Promise(function (resolve, reject) {
+      var w = { b1: b1, resolve: resolve, reject: reject };
+      w.timer = setTimeout(function () {
+        self.waiters.splice(self.waiters.indexOf(w), 1);
+        reject(new Error("プリンタからの応答がありません (5a" + ("0" + b1.toString(16)).slice(-2) + ")"));
+      }, ms || REPLY_TIMEOUT_MS);
+      self.waiters.push(w);
+    });
+  };
+
+  Printer.prototype._request = async function (bytes, ms) {
+    var p = this._wait(bytes[1], ms);
+    await this._write(bytes);
+    return p;
+  };
+
+  Printer.prototype._onNotify = function (ev) {
+    var msg = new Uint8Array(ev.target.value.buffer.slice(0));
+    this.log("<-", hex(msg));
+    if (msg[0] !== 0x5a) return;
+    var kind = msg[1];
+    if (kind === 0x02 && msg.length >= 5) {
+      var st = { battery: msg[2], noPaper: !!msg[3], charging: msg[4] === 1 };
+      this.lastStatus = st;
+      this._emit("printerstatus", st);
+      if (st.noPaper && this.job) this.job.fail(new Error("紙がありません（またはフタが開いています）"));
+    }
+    if (kind === 0x05 && this.job) { this.job.retransmit((msg[2] << 8) | msg[3]); }
+    if (kind === 0x08 && this.job) { this.job.paused = true; }
+    if (kind === 0x06 && this.job) { this.job.finish(); }
+    for (var i = 0; i < this.waiters.length; i++) {
+      var w = this.waiters[i];
+      if (w.b1 === kind) {
+        clearTimeout(w.timer);
+        this.waiters.splice(i, 1);
+        w.resolve(msg);
+        break;
+      }
+    }
+  };
+
+  Printer.prototype._handshake = async function () {
+    var info = await this._request(new Uint8Array([0x5a, 0x01, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]));
+    var mac = info.slice(4, 10);
+    var challenge = new Uint8Array(10);
+    crypto.getRandomValues(challenge);
+    var crcs = Array.prototype.map.call(challenge, function (b) {
+      var buf = new Uint8Array(7); buf[0] = b; buf.set(mac, 1); return crc16xmodem(buf);
+    });
+    var a = new Uint8Array(12); a[0] = 0x5a; a[1] = 0x0a; a.set(challenge, 2);
+    await this._request(a);
+    var b = new Uint8Array(12); b[0] = 0x5a; b[1] = 0x0b;
+    crcs.forEach(function (c, i) { b[2 + i] = c >> 8; });
+    var res = await this._request(b);
+    if (res[2] !== 1) throw new Error("プリンタの認証に失敗しました");
+    this.log("handshake OK");
+  };
+
+  /** canvas を印刷 */
+  Printer.prototype.printCanvas = async function (canvas, opts) {
+    opts = opts || {};
+    if (this.busy) throw new Error("印刷中です。終わるまでお待ちください。");
+    this.busy = true;
+    var self = this;
+    try {
+      if (!this.isConnected()) await this.connect();
+      if (canvas.width !== WIDTH) canvas = fitToWidth(canvas);
+      var packets = canvasToPackets(canvas, opts.threshold);
+      var n = packets.length;
+      var energy = Math.max(1, Math.min(6, opts.energy || this.energy));
+
+      this._status("印刷中…");
+      await this._request(new Uint8Array([0x5a, 0x0c, energy]));
+      await this._request(new Uint8Array([0x5a, 0x04, (n >> 8) & 0xff, n & 0xff, 0x00, 0x00]));
+
+      var job = this.job = { paused: false, restartAt: -1, done: false };
+      var finished = new Promise(function (resolve, reject) {
+        job.finish = function () { job.done = true; resolve(); };
+        job.fail = function (e) { job.done = true; reject(e); };
+        job.retransmit = function (idx) { self.log("retransmit from", idx); job.restartAt = idx; job.paused = false; };
+      });
+      finished.catch(function () {});
+
+      var i = 0;
+      var deadline = Date.now() + FINISH_TIMEOUT_MS;
+      while (!job.done && Date.now() < deadline) {
+        if (job.restartAt >= 0) { i = job.restartAt; job.restartAt = -1; }
+        if (job.paused || i >= n) { await sleep(20); continue; }
+        await this._write(packets[i]);
+        i++;
+        if (opts.onProgress) opts.onProgress(Math.min(1, i / n));
+        await sleep(PACKET_DELAY_MS);
+      }
+      if (!job.done) throw new Error("印刷が完了しませんでした（タイムアウト）");
+      await finished;
+      await this._request(new Uint8Array([0x5a, 0x04, (n >> 8) & 0xff, n & 0xff, 0x01, 0x00])).catch(function () {});
+      this._status("印刷しました");
+    } catch (e) {
+      this._status("エラー：" + e.message);
+      throw e;
+    } finally {
+      this.job = null;
+      this.busy = false;
+    }
+  };
+
+  /** 書式付きテキストを印刷 */
+  Printer.prototype.printText = function (text, opts) {
+    return this.printCanvas(renderText(text, opts), opts);
+  };
+
+  /** 画像（<img> や canvas）を印刷 */
+  Printer.prototype.printImage = function (img, opts) {
+    return this.printCanvas(fitToWidth(img), opts);
+  };
+
+  var printer = new Printer();
+  printer.renderText = renderText;   // プレビュー用
+  printer.Printer = Printer;
+  printer._internal = { crc16xmodem: crc16xmodem, canvasToPackets: canvasToPackets };
+  global.LXD02 = printer;
+})(typeof window !== "undefined" ? window : this);
+
+</script>
+<script>
+(function () {
+  "use strict";
+  var $ = function (id) { return document.getElementById(id); };
+  var current = null;      // いま表示しているカルテ
+  var pending = null;      // 接続待ちのカルテ
+  var DONE_KEY = "lxd02_done_ids";
+
+  function setMsg(t, cls) { var m = $("msg"); m.textContent = t || ""; m.className = cls || ""; }
+  function setConn() {
+    var on = LXD02.isConnected();
+    $("conn").innerHTML = '<span class="dot ' + (on ? "on" : "") + '"></span>' + (on ? "接続中" : "未接続");
+    $("connectBtn").textContent = on ? "接続しています" : (pending ? "接続して印刷" : "プリンタに接続");
+    $("connectBtn").disabled = on;
+    $("printBtn").disabled = !current;
+  }
+  LXD02.on("status", function (t) { setMsg(t, /エラー/.test(t) ? "err" : /印刷しました/.test(t) ? "ok" : ""); setConn(); });
+  LXD02.on("connected", setConn);
+  LXD02.on("disconnected", setConn);
+  LXD02.on("printerstatus", function (s) { $("batt").textContent = "電池 " + s.battery + "%" + (s.noPaper ? "　紙なし" : ""); });
+
+  // 同じカルテを2回印刷しないように、処理したIDを覚えておく（再読み込み対策）
+  function doneIds() { try { return JSON.parse(sessionStorage.getItem(DONE_KEY) || "[]"); } catch (e) { return []; } }
+  function markDone(id) { try { var a = doneIds(); a.push(id); sessionStorage.setItem(DONE_KEY, JSON.stringify(a.slice(-50))); } catch (e) {} }
+
+  // ---- カルテ → 印刷用テキスト ----------------------------------------
+  function def(d) { return (d.defects || []).join("、") + (d.lc ? "（LC " + d.lc + "）" : ""); }
+  function karteText(k) {
+    var L = [];
+    L.push("# 修理カルテ");
+    L.push(">> カルテNo.");
+    L.push("#! " + k.no);
+    L.push("===");
+    L.push("作成\t" + (k.createdAt || "").slice(0, 16));
+    L.push("作業者\t" + (k.worker || ""));
+    L.push("工程\t" + (k.process || ""));
+    L.push("機種\t" + (k.model || ""));
+    if (k.board) L.push("基板\t" + k.board + "枚目");
+    var defs = k.defects || [];
+    var ngNos = [];
+    defs.forEach(function (d) { if (d.piece && ngNos.indexOf(String(d.piece)) < 0) ngNos.push(String(d.piece)); });
+    if (k.rows > 0 && k.cols > 0) {
+      L.push("---");
+      L.push("## 不具合の位置（黒＝不具合）");
+      L.push("[[grid " + k.rows + " " + k.cols + " " + ngNos.join(",") + "]]");
+    }
+    L.push("---");
+    L.push("## 不具合（" + defs.length + "件）");
+    defs.slice().sort(function (a, b) { return (+a.piece || 0) - (+b.piece || 0); }).forEach(function (d) {
+      L.push((d.piece ? "【分割" + d.piece + "】" : "・") + def(d) + (d.fix ? " ※訂正" : ""));
+      if (d.repair) L.push("　→ " + d.repair + (d.repairBy ? "（" + d.repairBy + "）" : ""));
+    });
+    L.push("---");
+    L.push("修理状況\t" + (k.status || "未修理"));
+    if (k.repairer) L.push("修理者\t" + k.repairer);
+    if (k.repairedAt) L.push("修理完了\t" + k.repairedAt.slice(0, 16));
+    L.push("");
+    L.push(">> - - - - き り と り - - - -");
+    L.push("");
+    L.push(">> 修理カルテNo.");
+    L.push("#! " + k.no);
+    L.push(">> " + (k.model || ""));
+    L.push(">> " + (k.board ? "基板" + k.board + "枚目　" : "") + "不具合：" + (ngNos.length ? "分割" + ngNos.slice(0, 10).join("・") + (ngNos.length > 10 ? " ほか" + (ngNos.length - 10) : "") : defs.length + "件"));
+    L.push(">> 作成 " + (k.createdAt || "").slice(0, 16) + "　" + (k.worker || ""));
+    return L.join("\n");
+  }
+
+  function show(k) {
+    current = k;
+    var c = LXD02.renderText(karteText(k), { feed: 90 });
+    $("preview").innerHTML = "";
+    $("preview").appendChild(c);
+    setConn();
+  }
+
+  async function printCurrent() {
+    if (!current) return;
+    $("prog").style.width = "0";
+    try {
+      await LXD02.printText(karteText(current), { feed: 90, onProgress: function (p) { $("prog").style.width = Math.round(p * 100) + "%"; } });
+      pending = null;
+      var li = document.createElement("li");
+      var t = new Date();
+      li.textContent = ("0" + t.getHours()).slice(-2) + ":" + ("0" + t.getMinutes()).slice(-2) + "　" + current.no + "　" + (current.model || "");
+      $("hist").insertBefore(li, $("hist").firstChild);
+      setMsg("印刷しました：" + current.no, "ok");
+    } catch (e) {
+      setMsg("エラー：" + (e && e.message || e), "err");
+    }
+    setConn();
+  }
+
+  // ---- カルテアプリから届いたデータ（URLの # 以降）を読む --------------------
+  async function receive() {
+    var h = location.hash;
+    if (h.indexOf("#p=") !== 0) return;
+    var data;
+    try { data = JSON.parse(decodeURIComponent(h.slice(3))); } catch (e) { setMsg("カルテを読み取れませんでした", "err"); return; }
+    history.replaceState(null, "", location.pathname + location.search + "#done");
+    if (!data || !data.karte) return;
+    if (data.id && doneIds().indexOf(data.id) >= 0) return; // 再読み込みでの二重印刷を防ぐ
+    if (data.id) markDone(data.id);
+    show(data.karte);
+    if (!$("auto").checked) { setMsg("カルテが届きました。「このカルテをもう一度印刷」で印刷できます"); return; }
+    if (!LXD02.isConnected()) {
+      setMsg("プリンタにつないでいます…");
+      var ok = await LXD02.reconnectKnown().catch(function () { return false; });
+      if (!ok) { pending = data.karte; setConn(); setMsg("「接続して印刷」を押してください（初回やプリンタの電源を入れ直したとき）", "err"); return; }
+    }
+    await printCurrent();
+  }
+
+  $("connectBtn").addEventListener("click", async function () {
+    try {
+      await LXD02.connect();
+      if (pending) await printCurrent();
+    } catch (e) {
+      if (e && e.name === "NotFoundError") setMsg("プリンタが選ばれませんでした");
+      else setMsg("接続できませんでした：" + (e && e.message || e), "err");
+    }
+    setConn();
+  });
+  $("printBtn").addEventListener("click", printCurrent);
+  window.addEventListener("hashchange", receive);
+
+  if (!LXD02.isSupported()) {
+    setMsg("このブラウザはBluetooth印刷に対応していません。ChromeかEdgeで開いてください。", "err");
+    $("connectBtn").disabled = true;
+  } else {
+    // 以前に許可したプリンタがあれば、選択画面なしでつなぐ
+    if (location.hash.indexOf("#p=") === 0) receive();
+    else LXD02.reconnectKnown().then(setConn).catch(function () {});
+  }
+  setConn();
+})();
+</script>
+</body>
+</html>
